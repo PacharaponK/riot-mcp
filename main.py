@@ -1,10 +1,21 @@
-from typing import Any
-import httpx
-import urllib.parse
-from mcp.server.fastmcp import FastMCP
-from dotenv import load_dotenv
-import os
+# Standard library imports
 import asyncio
+import os
+import urllib.parse
+from typing import Any
+
+# Third-party imports
+import httpx
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+
+# Local application imports
+from exceptions import (
+    RiotAPIError,
+    RiotAPINotFoundError,
+    RiotAPIRateLimitError,
+    RiotAPIUnauthorizedError,
+)
 
 load_dotenv()
 
@@ -19,18 +30,53 @@ ACCOUNT_ENDPOINT = "/riot/account/v1/accounts/by-riot-id/{gameName}/{tagLine}"
 LOL_ACCOUNT_PUUID_ENDPOINT = "/lol/summoner/v4/summoners/by-puuid/{encryptedPUUID}"
 
 # Helper function to make requests to the Riot API
-async def make_riot_request(url: str) -> dict[str, Any] | None:
-    """Make a request to the Riot API with proper error handling."""
+async def make_riot_request(url: str) -> dict[str, Any]:
+    """Make a request to the Riot API with proper error handling.
+    
+    Args:
+        url: The full URL to make the request to
+        
+    Returns:
+        dict: The JSON response from the API
+        
+    Raises:
+        RiotAPIRateLimitError: If rate limit is exceeded
+        RiotAPIUnauthorizedError: If API key is invalid or missing
+        RiotAPINotFoundError: If the requested resource is not found
+        httpx.RequestError: If there's an issue with the request
+        ValueError: If the response is not valid JSON
+    """
+    if not RIOT_API_KEY:
+        raise ValueError("RIOT_API_KEY environment variable is not set")
+        
     headers = {
-        "X-Riot-Token": RIOT_API_KEY
+        "X-Riot-Token": RIOT_API_KEY,
+        "Accept": "application/json"
     }
-    async with httpx.AsyncClient() as client:
-        try:
+    
+    try:
+        async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers, timeout=30.0)
+            
+            if response.status_code == 429:
+                retry_after = response.headers.get('Retry-After', 'unknown')
+                raise RiotAPIRateLimitError(
+                    f"Rate limit exceeded. Retry after: {retry_after} seconds"
+                )
+            elif response.status_code == 401:
+                raise RiotAPIUnauthorizedError("Invalid or missing API key")
+            elif response.status_code == 404:
+                raise RiotAPINotFoundError(f"Resource not found: {url}")
+            elif response.status_code >= 500:
+                raise RiotAPIError(f"Riot API server error: {response.status_code}")
+                
             response.raise_for_status()
             return response.json()
-        except Exception:
-            return None
+            
+    except httpx.RequestError as e:
+        raise RiotAPIError(f"Request to Riot API failed: {str(e)}") from e
+    except ValueError as e:
+        raise ValueError(f"Invalid JSON response from Riot API: {str(e)}") from e
 
 # MCP tool to get a Riot account by game name and tag line
 @mcp.tool()
@@ -42,79 +88,78 @@ async def get_account(game_name: str, tag_line: str) -> dict[str, Any] | None:
         tag_line: The player's tag line (without the '#')
         
     Returns:
-        dict: Player account data if found, None otherwise
+        dict: Player account data if found, None if not found
         
     Raises:
-        ValueError: If input parameters are invalid
-        Exception: For other unexpected errors
+        ValueError: If input parameters are invalid or missing required data
+        RiotAPIError: For Riot API related errors
+        httpx.RequestError: For network-related errors
     """
     if not game_name or not isinstance(game_name, str):
         raise ValueError("Game name must be a non-empty string")
     if not tag_line or not isinstance(tag_line, str):
         raise ValueError("Tag line must be a non-empty string")
     
+    # Format the URL with proper URL encoding
+    encoded_game_name = urllib.parse.quote(game_name)
+    encoded_tag_line = urllib.parse.quote(tag_line)
+    url = f"{RIOT_API_BASE}{ACCOUNT_ENDPOINT}".format(
+        gameName=encoded_game_name,
+        tagLine=encoded_tag_line
+    )
+    
     try:
-        # Format the URL with proper URL encoding
-        encoded_game_name = urllib.parse.quote(game_name)
-        encoded_tag_line = urllib.parse.quote(tag_line)
-        url = f"{RIOT_API_BASE}{ACCOUNT_ENDPOINT}".format(
-            gameName=encoded_game_name,
-            tagLine=encoded_tag_line
-        )
-        
-        response = await make_riot_request(url)
-        
-        if response is None:
-            # Log the failed attempt (you might want to add proper logging here)
-            print(f"Failed to retrieve account for {game_name}#{tag_line}")
-            
-        return response
-        
+        return await make_riot_request(url)
+    except RiotAPINotFoundError:
+        # Account not found is a normal case, return None
+        return None
+    except RiotAPIError as e:
+        # Log the error (in a real app, use proper logging)
+        print(f"Riot API error: {str(e)}")
+        raise
     except Exception as e:
-        # Log the error and re-raise with a more descriptive message
-        error_msg = f"Error fetching account data for {game_name}#{tag_line}: {str(e)}"
+        # Catch any other unexpected errors
+        error_msg = f"Unexpected error fetching account data for {game_name}#{tag_line}: {str(e)}"
         print(error_msg)
-        raise Exception(error_msg) from e
+        raise RuntimeError(error_msg) from e
 
 # MCP tool to get a Riot account by PUUID
 @mcp.tool()
 async def get_lol_account_by_puuid(puuid: str) -> dict[str, Any] | None:
-    """Get a lol account by PUUID.
+    """Get a LoL account by PUUID.
     
     Args:
         puuid: The player's PUUID
         
     Returns:
-        dict: Player account data if found, None otherwise
+        dict: Player account data if found, None if not found
         
     Raises:
-        ValueError: If input parameters are invalid
-        Exception: For other unexpected errors
+        ValueError: If PUUID is invalid or missing required data
+        RiotAPIError: For Riot API related errors
+        httpx.RequestError: For network-related errors
     """
     if not puuid or not isinstance(puuid, str):
         raise ValueError("PUUID must be a non-empty string")
     
-    try:
-        # Format the URL with proper URL encoding
-        url = f"{RIOT_API_BASE_V2}{LOL_ACCOUNT_PUUID_ENDPOINT}".format(
-            encryptedPUUID=puuid
-        )
-        
-        response = await make_riot_request(url)
-        
-        if response is None:
-            # Log the failed attempt (you might want to add proper logging here)
-            print(f"Failed to retrieve account for {puuid}")
-            
-        return response
-        
-    except Exception as e:
-        # Log the error and re-raise with a more descriptive message
-        error_msg = f"Error fetching account data for {puuid}: {str(e)}"
-        print(error_msg)
-        raise Exception(error_msg) from e
-
+    url = f"{RIOT_API_BASE_V2}{LOL_ACCOUNT_PUUID_ENDPOINT}".format(
+        encryptedPUUID=puuid
+    )
     
+    try:
+        return await make_riot_request(url)
+    except RiotAPINotFoundError:
+        # Account not found is a normal case, return None
+        return None
+    except RiotAPIError as e:
+        # Log the error (in a real app, use proper logging)
+        print(f"Riot API error for PUUID {puuid}: {str(e)}")
+        raise
+    except Exception as e:
+        # Catch any other unexpected errors
+        error_msg = f"Unexpected error fetching LoL account data for PUUID {puuid}: {str(e)}"
+        print(error_msg)
+        raise RuntimeError(error_msg) from e
 
 async def main():
     # Example usage of get_account
