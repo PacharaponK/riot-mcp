@@ -123,6 +123,53 @@ async def get_account(game_name: str, tag_line: str) -> dict[str, Any] | None:
         print(error_msg)
         raise RuntimeError(error_msg) from e
 
+@mcp.tool()
+async def get_account_by_name(game_name: str, tag_line: str) -> dict[str, Any] | None:
+    """Get a Riot account by game name and tag line.
+    
+    This function first retrieves the account information using the Riot ID (game name and tag line),
+    then fetches the associated League of Legends account details using the PUUID.
+    
+    Args:
+        game_name: The in-game name of the player (case-insensitive)
+        tag_line: The player's tag line (without the '#')
+        
+    Returns:
+        dict: Player account data if found, None if not found
+        
+    Raises:
+        ValueError: If input parameters are invalid or missing required data
+        RiotAPIError: For Riot API related errors
+        RuntimeError: For unexpected errors during the process
+        httpx.RequestError: For network-related errors
+    """
+    try:
+        # Get the account information first
+        account = await get_account(game_name, tag_line)
+        if not account:
+            return None
+            
+        # Get the League of Legends account details using the PUUID
+        lol_account = await get_lol_account_by_puuid(account['puuid'])
+        if not lol_account:
+            print(f"No League of Legends account found for PUUID: {account['puuid']}")
+            return None
+            
+        # Combine the account information
+        return {
+            **account,
+            'lol_account': lol_account
+        }
+        
+    except RiotAPINotFoundError:
+        # Account not found is a normal case, return None
+        return None
+    except Exception as e:
+        # Catch any other unexpected errors
+        error_msg = f"Unexpected error fetching LoL account data for PUUID : {str(e)}"
+        print(error_msg)
+        raise RuntimeError(error_msg) from e
+
 # MCP tool to get a Riot account by PUUID
 @mcp.tool()
 async def get_lol_account_by_puuid(puuid: str) -> dict[str, Any] | None:
