@@ -41,7 +41,7 @@ A FastMCP server that provides access to Riot Games API endpoints, specifically 
 
 1. Start the MCP server:
    ```bash
-   python riot.py
+   python main.py
    ```
 
 2. The server will start and be ready to accept requests.
